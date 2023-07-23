@@ -1,0 +1,7 @@
+requests
+fyers_apiv2
+flask
+yfinance
+ta
+stockstats
+pyodbc
