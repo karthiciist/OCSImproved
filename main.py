@@ -17,6 +17,8 @@ import yfinance as yf
 import pyodbc
 import http.client
 import configparser
+from threading import Thread
+import os
 
 
 app = Flask(__name__)
@@ -26,7 +28,7 @@ response_t = "code"
 state = "sample_state"
 
 config_obj = configparser.ConfigParser()
-config_obj.read(".\configfile.ini")
+config_obj.read("..\configfile.ini")
 dbparam = config_obj["mssql"]
 symbolparam = config_obj["symbol"]
 
@@ -70,6 +72,13 @@ def process_authcode_from_fyers():
         global access_token
         access_token = response["access_token"]
         print("access token ", access_token)
+
+        text_file = open("../access_token.txt", "w")
+        text_file.write(access_token)
+        text_file.close()
+
+        # os.environ['ocs_access_token'] = access_token
+
         global refresh_token
         refresh_token = response["refresh_token"]
         return render_template('authorized.html')
@@ -91,221 +100,245 @@ def run_ocs_strategy():
             now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             to_log_db_dict["timestamp"] = now
 
-            if is_it_trade_time():
-                print("Its trade time")
-                to_log_db_dict["is_trade_time"] = "Y"
+            open_orders_count = get_open_orders_count()
 
-                # Read DB tables and get necessary values
-                conn = pyodbc.connect('Driver={SQL Server Native Client 11.0};'
-                                      r'Server=' + server + ';'
-                                      'Database=' + db + ';'
-                                      'Trusted_Connection=yes;')  # integrated security
-
-                cur = conn.cursor()
-                cur.execute('''Select Top 1 * From [OCSTrade].[dbo].[NIFTY_1m_Ticker] Order By datetime Desc''')
-                index_ticker_blob = cur.fetchall()
-
-                index_open = float(index_ticker_blob[0][0])
-                index_close = float(index_ticker_blob[0][1])
-                index_high = float(index_ticker_blob[0][2])
-                index_low = float(index_ticker_blob[0][3])
-                index_sma = float(index_ticker_blob[0][10])
-                index_smma = float(index_ticker_blob[0][11])
-                index_adx = float(index_ticker_blob[0][12])
-                # index_adx = 20
-                index_ema9 = float(index_ticker_blob[0][13])
-
-                to_log_db_dict["index_open"] = index_open
-                to_log_db_dict["index_close"] = index_close
-                to_log_db_dict["index_high"] = index_high
-                to_log_db_dict["index_low"] = index_low
-                to_log_db_dict["index_sma"] = index_sma
-                to_log_db_dict["index_smma"] = index_smma
-                to_log_db_dict["index_adx"] = index_adx
-                to_log_db_dict["index_ema9"] = index_ema9
-
-
-                if index_close > index_ema9:
-                    # Taking call path
-                    print("index_close > index_ema9")
-                    print("Taking call path")
-                    cur2 = conn.cursor()
-                    cur2.execute('''Select Top 1 * From [OCSTrade].[dbo].[CE_STRIKE_1m_Ticker] Order By datetime Desc''')
-                    strike_ticker_blob = cur2.fetchall()
-
-                    strike_open = float(strike_ticker_blob[0][0])
-                    strike_close = float(strike_ticker_blob[0][1])
-                    strike_high = float(strike_ticker_blob[0][2])
-                    strike_low = float(strike_ticker_blob[0][3])
-                    strike_sma = float(strike_ticker_blob[0][10])
-                    strike_smma = float(strike_ticker_blob[0][11])
-                    strike_adx = float(strike_ticker_blob[0][12])
-                    strike_ema9 = float(strike_ticker_blob[0][13])
-
-                    epoch = int(strike_ticker_blob[0][8])
-                    date_time = str(strike_ticker_blob[0][9])
-
-                    strike_buy = strike_ticker_blob[0][17]
-
-
-                    to_log_db_dict["strike_open"] = strike_open
-                    to_log_db_dict["strike_close"] = strike_close
-                    to_log_db_dict["strike_high"] = strike_high
-                    to_log_db_dict["strike_low"] = strike_low
-                    to_log_db_dict["strike_sma"] = strike_sma
-                    to_log_db_dict["strike_smma"] = strike_smma
-                    to_log_db_dict["strike_adx"] = strike_adx
-                    to_log_db_dict["strike_ema9"] = strike_ema9
-
-                    if strike_smma > strike_sma:
-                        print("strike_smma > strike_sma")
-                        hammer_formed_dict = is_hammer_formed("CE_STRIKE_1m_Ticker")
-
-                        hammer_formed = hammer_formed_dict["hammer_formed"]
-                        hammer_high = hammer_formed_dict["hammer_high"]
-                        hammer_low = hammer_formed_dict["hammer_low"]
-
-                        if hammer_formed == "Y":
-                            print("hammer formed")
-                            to_log_db_dict["hammer"] = "Y"
-
-                            telegram_msg_hammer = "Hammer candle formed for " + symbolparam["cesymbol"] + " at " + str(date_time) + "%0A Open price - " + str(strike_open) + "%0A Close price - " + str(strike_close) + "%0A High price - " + str(strike_high) + "%0A Low price - " + str(strike_low) + "%0A SMA - " + str(strike_sma) + "%0A SMMA - " + str(strike_smma)
-                            telegram_hammer_response = send_to_telegram(telegram_msg_hammer)
-                            print("telegram_hammer_response - ", telegram_hammer_response)
-
-                            if index_adx > 19.7:
-                                print("index_adx > 19.7")
-                                # if strike_buy == "Y":
-                                print("strike_buy == Y")
-                                to_log_db_dict["buy"] = "Y"
-
-                                to_buy_db_dict["symbol"] = symbolparam["cesymbol"]
-                                to_buy_db_dict["hammer_high"] = hammer_high
-                                to_buy_db_dict["hammer_low"] = hammer_low
-                                to_buy_db_dict["epoch"] = epoch
-                                to_buy_db_dict["timestamp"] = now
-
-                                # populate_buy_table(to_buy_db_dict)
-                                # populate_log_table(to_log_db_dict)
-
-                                # telegram_msg = "Buy signal for " + symbolparam["cesymbol"] + " generated"
-                                # telegram_response = send_to_telegram(telegram_msg)
-
-                                update_buy_column(epoch, "CE_STRIKE_1m_Ticker")
-
-                                # update_buy_table(symbolparam["cesymbol"], hammer_high, hammer_low, epoch, now)
-                                update_buy_table(to_buy_db_dict)
-
-                                # print("telegram_response - ", telegram_response)
-                                print("Buy signal generated")
-                                print("--------------------------------------")
-
-                            else:
-                                print("ADX less than 19.7")
-                                update_reason_column(epoch, "ADX < 19.7", "[OCSTrade].[dbo].[CE_STRIKE_1m_Ticker]")
-                                print("--------------------------------------")
-                        else:
-                            to_log_db_dict["hammer"] = "N"
-                            print("No hammer formed")
-                            update_reason_column(epoch, "No hammer formed", "[OCSTrade].[dbo].[CE_STRIKE_1m_Ticker]")
-                    else:
-                        print("SMA > SMMA")
-                        update_reason_column(epoch, "SMA > SMMA", "[OCSTrade].[dbo].[CE_STRIKE_1m_Ticker]")
-
-                else:
-                    # Taking put path
-                    print("index_close < index_ema9")
-                    print("Taking put path")
-                    cur2 = conn.cursor()
-                    cur2.execute(
-                        '''Select Top 1 * From [OCSTrade].[dbo].[PE_STRIKE_1m_Ticker] Order By datetime Desc''')
-                    strike_ticker_blob = cur2.fetchall()
-
-                    strike_open = float(strike_ticker_blob[0][0])
-                    strike_close = float(strike_ticker_blob[0][1])
-                    strike_high = float(strike_ticker_blob[0][2])
-                    strike_low = float(strike_ticker_blob[0][3])
-                    strike_sma = float(strike_ticker_blob[0][10])
-                    strike_smma = float(strike_ticker_blob[0][11])
-                    strike_adx = float(strike_ticker_blob[0][12])
-                    # strike_ema9 = float(strike_ticker_blob[0][13])
-                    #
-                    # strike_ema9 = float(strike_ticker_blob[0][13])
-                    # strike_ema9 = float(strike_ticker_blob[0][13])
-                    strike_ema9 = float(strike_ticker_blob[0][13])
-
-                    epoch = int(strike_ticker_blob[0][8])
-                    date_time = str(strike_ticker_blob[0][9])
-
-                    strike_buy = strike_ticker_blob[0][17]
-
-                    to_log_db_dict["strike_open"] = strike_open
-                    to_log_db_dict["strike_close"] = strike_close
-                    to_log_db_dict["strike_high"] = strike_high
-                    to_log_db_dict["strike_low"] = strike_low
-                    to_log_db_dict["strike_sma"] = strike_sma
-                    to_log_db_dict["strike_smma"] = strike_smma
-                    to_log_db_dict["strike_adx"] = strike_adx
-                    to_log_db_dict["strike_ema9"] = strike_ema9
-
-                    if strike_smma > strike_sma:
-                        print("strike_smma > strike_sma")
-                        hammer_formed_dict = is_hammer_formed("PE_STRIKE_1m_Ticker")
-
-                        hammer_formed = hammer_formed_dict["hammer_formed"]
-                        hammer_high = hammer_formed_dict["hammer_high"]
-                        hammer_low = hammer_formed_dict["hammer_low"]
-
-                        if hammer_formed == "Y":
-                            print("hammer formed")
-                            to_log_db_dict["hammer"] = "Y"
-
-                            telegram_msg_hammer = "Hammer candle formed for " + symbolparam["pesymbol"] + " at " + str(date_time) + "%0A Open price - " + str(strike_open) + "%0A Close price - " + str(strike_close) + "%0A High price - " + str(strike_high) + "%0A Low price - " + str(strike_low) + "%0A SMA - " + str(strike_sma) + "%0A SMMA - " + str(strike_smma)
-                            telegram_hammer_response = send_to_telegram(telegram_msg_hammer)
-                            print("telegram_hammer_response - ", telegram_hammer_response)
-
-                            if index_adx > 19.7:
-                                print("index_adx > 19.7")
-                                # if strike_buy == "Y":
-                                print("strike_buy == Y")
-                                to_log_db_dict["buy"] = "Y"
-
-                                to_buy_db_dict["symbol"] = symbolparam["pesymbol"]
-                                to_buy_db_dict["hammer_high"] = hammer_high
-                                to_buy_db_dict["hammer_low"] = hammer_low
-                                to_buy_db_dict["epoch"] = epoch
-                                to_buy_db_dict["timestamp"] = now
-
-                                # populate_buy_table(to_buy_db_dict)
-                                # populate_log_table(to_log_db_dict)
-
-                                # telegram_msg = "Buy signal for " + symbolparam["pesymbol"] + " generated"
-                                # telegram_response = send_to_telegram(telegram_msg)
-
-                                update_buy_column(epoch, "PE_STRIKE_1m_Ticker")
-
-                                # update_buy_table(symbolparam["pesymbol"], hammer_high, hammer_low, epoch, now)
-                                update_buy_table(to_buy_db_dict)
-
-                                # print("telegram_response - ", telegram_response)
-                                print("Buy signal generated")
-                                print("--------------------------------------")
-
-                            else:
-                                print("ADX less than 19.7")
-                                update_reason_column(epoch, "ADX < 19.7", "[OCSTrade].[dbo].[PE_STRIKE_1m_Ticker]")
-                        else:
-                            to_log_db_dict["hammer"] = "N"
-                            print("No hammer formed")
-                            update_reason_column(epoch, "No hammer formed", "[OCSTrade].[dbo].[PE_STRIKE_1m_Ticker]")
-                    else:
-                        print("SMA > SMMA")
-                        update_reason_column(epoch, "SMA > SMMA", "[OCSTrade].[dbo].[PE_STRIKE_1m_Ticker]")
+            if (open_orders_count > 0):
+                print ("An open order is still available")
             else:
-                print("not a trade time")
-                to_log_db_dict["is_trade_time"] = "N"
+                if is_it_trade_time():
+                    print("Its trade time")
+                    to_log_db_dict["is_trade_time"] = "Y"
 
-            populate_log_table(to_log_db_dict)
+                    # Read DB tables and get necessary values
+                    conn = pyodbc.connect('Driver={SQL Server Native Client 11.0};'
+                                          r'Server=' + server + ';'
+                                          'Database=' + db + ';'
+                                          'Trusted_Connection=yes;')  # integrated security
+
+                    cur = conn.cursor()
+                    cur.execute('''Select Top 1 * From [OCSTrade].[dbo].[NIFTY_1m_Ticker] Order By datetime Desc''')
+                    index_ticker_blob = cur.fetchall()
+
+                    index_open = float(index_ticker_blob[0][0])
+                    index_close = float(index_ticker_blob[0][1])
+                    index_high = float(index_ticker_blob[0][2])
+                    index_low = float(index_ticker_blob[0][3])
+                    index_sma = float(index_ticker_blob[0][10])
+                    index_smma = float(index_ticker_blob[0][11])
+                    index_adx = float(index_ticker_blob[0][12])
+                    # index_adx = 20
+                    index_ema9 = float(index_ticker_blob[0][13])
+
+                    to_log_db_dict["index_open"] = index_open
+                    to_log_db_dict["index_close"] = index_close
+                    to_log_db_dict["index_high"] = index_high
+                    to_log_db_dict["index_low"] = index_low
+                    to_log_db_dict["index_sma"] = index_sma
+                    to_log_db_dict["index_smma"] = index_smma
+                    to_log_db_dict["index_adx"] = index_adx
+                    to_log_db_dict["index_ema9"] = index_ema9
+
+
+                    if index_close > index_ema9:
+                        # Taking call path
+                        print("index_close > index_ema9")
+                        print("Taking call path")
+                        cur2 = conn.cursor()
+                        cur2.execute('''Select Top 1 * From [OCSTrade].[dbo].[CE_STRIKE_1m_Ticker] Order By datetime Desc''')
+                        strike_ticker_blob = cur2.fetchall()
+
+                        strike_open = float(strike_ticker_blob[0][0])
+                        strike_close = float(strike_ticker_blob[0][1])
+                        strike_high = float(strike_ticker_blob[0][2])
+                        strike_low = float(strike_ticker_blob[0][3])
+                        strike_sma = float(strike_ticker_blob[0][10])
+                        strike_smma = float(strike_ticker_blob[0][11])
+                        strike_adx = float(strike_ticker_blob[0][12])
+                        strike_ema9 = float(strike_ticker_blob[0][13])
+
+
+                        strike_symbol_ce = strike_ticker_blob[0][19]
+
+                        fyers_strike_symbol_ce = strike_ticker_blob[0][21]
+
+                        epoch = int(strike_ticker_blob[0][8])
+                        date_time = str(strike_ticker_blob[0][9])
+
+                        strike_buy = strike_ticker_blob[0][17]
+
+
+                        to_log_db_dict["strike_open"] = strike_open
+                        to_log_db_dict["strike_close"] = strike_close
+                        to_log_db_dict["strike_high"] = strike_high
+                        to_log_db_dict["strike_low"] = strike_low
+                        to_log_db_dict["strike_sma"] = strike_sma
+                        to_log_db_dict["strike_smma"] = strike_smma
+                        to_log_db_dict["strike_adx"] = strike_adx
+                        to_log_db_dict["strike_ema9"] = strike_ema9
+
+                        if strike_smma > strike_sma:
+                            print("strike_smma > strike_sma")
+                            hammer_formed_dict = is_hammer_formed("CE_STRIKE_1m_Ticker")
+
+                            hammer_formed = hammer_formed_dict["hammer_formed"]
+                            hammer_high = hammer_formed_dict["hammer_high"]
+                            hammer_low = hammer_formed_dict["hammer_low"]
+
+                            if hammer_formed == "Y":
+                                print("hammer formed")
+                                to_log_db_dict["hammer"] = "Y"
+
+                                # telegram_msg_hammer = "Hammer candle formed for " + symbolparam["cesymbol"] + " at " + str(date_time) + "%0A Open price - " + str(strike_open) + "%0A Close price - " + str(strike_close) + "%0A High price - " + str(strike_high) + "%0A Low price - " + str(strike_low) + "%0A SMA - " + str(strike_sma) + "%0A SMMA - " + str(strike_smma)
+                                telegram_msg_hammer = "Hammer candle formed for " + strike_symbol_ce + " at " + str(
+                                    date_time) + "%0A Open price - " + str(strike_open) + "%0A Close price - " + str(
+                                    strike_close) + "%0A High price - " + str(strike_high) + "%0A Low price - " + str(
+                                    strike_low) + "%0A SMA - " + str(strike_sma) + "%0A SMMA - " + str(strike_smma)  + "%0A ADX - " + str(strike_adx)
+                                telegram_hammer_response = send_to_telegram(telegram_msg_hammer)
+                                print("telegram_hammer_response - ", telegram_hammer_response)
+
+                                if index_adx > 19.7:
+                                    print("index_adx > 19.7")
+                                    # if strike_buy == "Y":
+                                    print("strike_buy == Y")
+                                    to_log_db_dict["buy"] = "Y"
+
+                                    to_buy_db_dict["symbol"] = fyers_strike_symbol_ce
+                                    to_buy_db_dict["hammer_high"] = hammer_high
+                                    to_buy_db_dict["hammer_low"] = hammer_low
+                                    to_buy_db_dict["epoch"] = epoch
+                                    to_buy_db_dict["timestamp"] = now
+                                    to_buy_db_dict["global_symbol"] = strike_symbol_ce
+
+                                    # populate_buy_table(to_buy_db_dict)
+                                    # populate_log_table(to_log_db_dict)
+
+                                    # telegram_msg = "Buy signal for " + symbolparam["cesymbol"] + " generated"
+                                    # telegram_response = send_to_telegram(telegram_msg)
+
+                                    update_buy_column(epoch, "CE_STRIKE_1m_Ticker")
+
+                                    # update_buy_table(symbolparam["cesymbol"], hammer_high, hammer_low, epoch, now)
+                                    update_buy_table(to_buy_db_dict)
+
+                                    # print("telegram_response - ", telegram_response)
+                                    print("Buy signal generated")
+                                    print("--------------------------------------")
+
+                                else:
+                                    print("ADX less than 19.7")
+                                    update_reason_column(epoch, "ADX < 19.7", "[OCSTrade].[dbo].[CE_STRIKE_1m_Ticker]")
+                                    print("--------------------------------------")
+                            else:
+                                to_log_db_dict["hammer"] = "N"
+                                print("No hammer formed")
+                                update_reason_column(epoch, "No hammer formed", "[OCSTrade].[dbo].[CE_STRIKE_1m_Ticker]")
+                        else:
+                            print("SMA > SMMA")
+                            update_reason_column(epoch, "SMA > SMMA", "[OCSTrade].[dbo].[CE_STRIKE_1m_Ticker]")
+
+                    else:
+                        # Taking put path
+                        print("index_close < index_ema9")
+                        print("Taking put path")
+                        cur2 = conn.cursor()
+                        cur2.execute(
+                            '''Select Top 1 * From [OCSTrade].[dbo].[PE_STRIKE_1m_Ticker] Order By datetime Desc''')
+                        strike_ticker_blob = cur2.fetchall()
+
+                        strike_open = float(strike_ticker_blob[0][0])
+                        strike_close = float(strike_ticker_blob[0][1])
+                        strike_high = float(strike_ticker_blob[0][2])
+                        strike_low = float(strike_ticker_blob[0][3])
+                        strike_sma = float(strike_ticker_blob[0][10])
+                        strike_smma = float(strike_ticker_blob[0][11])
+                        strike_adx = float(strike_ticker_blob[0][12])
+                        # strike_ema9 = float(strike_ticker_blob[0][13])
+                        #
+                        # strike_ema9 = float(strike_ticker_blob[0][13])
+                        # strike_ema9 = float(strike_ticker_blob[0][13])
+                        strike_ema9 = float(strike_ticker_blob[0][13])
+
+                        strike_symbol_pe = strike_ticker_blob[0][19]
+
+                        fyers_strike_symbol_pe = strike_ticker_blob[0][21]
+
+                        epoch = int(strike_ticker_blob[0][8])
+                        date_time = str(strike_ticker_blob[0][9])
+
+                        strike_buy = strike_ticker_blob[0][17]
+
+                        to_log_db_dict["strike_open"] = strike_open
+                        to_log_db_dict["strike_close"] = strike_close
+                        to_log_db_dict["strike_high"] = strike_high
+                        to_log_db_dict["strike_low"] = strike_low
+                        to_log_db_dict["strike_sma"] = strike_sma
+                        to_log_db_dict["strike_smma"] = strike_smma
+                        to_log_db_dict["strike_adx"] = strike_adx
+                        to_log_db_dict["strike_ema9"] = strike_ema9
+
+                        if strike_smma > strike_sma:
+                            print("strike_smma > strike_sma")
+                            hammer_formed_dict = is_hammer_formed("PE_STRIKE_1m_Ticker")
+
+                            hammer_formed = hammer_formed_dict["hammer_formed"]
+                            hammer_high = hammer_formed_dict["hammer_high"]
+                            hammer_low = hammer_formed_dict["hammer_low"]
+
+                            if hammer_formed == "Y":
+                                print("hammer formed")
+                                to_log_db_dict["hammer"] = "Y"
+
+                                # telegram_msg_hammer = "Hammer candle formed for " + symbolparam["pesymbol"] + " at " + str(date_time) + "%0A Open price - " + str(strike_open) + "%0A Close price - " + str(strike_close) + "%0A High price - " + str(strike_high) + "%0A Low price - " + str(strike_low) + "%0A SMA - " + str(strike_sma) + "%0A SMMA - " + str(strike_smma)
+                                telegram_msg_hammer = "Hammer candle formed for " + strike_symbol_pe + " at " + str(
+                                    date_time) + "%0A Open price - " + str(strike_open) + "%0A Close price - " + str(
+                                    strike_close) + "%0A High price - " + str(strike_high) + "%0A Low price - " + str(
+                                    strike_low) + "%0A SMA - " + str(strike_sma) + "%0A SMMA - " + str(strike_smma) + "%0A ADX - " + str(strike_adx)
+                                telegram_hammer_response = send_to_telegram(telegram_msg_hammer)
+                                print("telegram_hammer_response - ", telegram_hammer_response)
+
+                                if index_adx > 19.7:
+                                    print("index_adx > 19.7")
+                                    # if strike_buy == "Y":
+                                    print("strike_buy == Y")
+                                    to_log_db_dict["buy"] = "Y"
+
+                                    to_buy_db_dict["symbol"] = fyers_strike_symbol_pe
+                                    to_buy_db_dict["hammer_high"] = hammer_high
+                                    to_buy_db_dict["hammer_low"] = hammer_low
+                                    to_buy_db_dict["epoch"] = epoch
+                                    to_buy_db_dict["timestamp"] = now
+                                    to_buy_db_dict["global_symbol"] = strike_symbol_pe
+
+                                    # populate_buy_table(to_buy_db_dict)
+                                    # populate_log_table(to_log_db_dict)
+
+                                    # telegram_msg = "Buy signal for " + symbolparam["pesymbol"] + " generated"
+                                    # telegram_response = send_to_telegram(telegram_msg)
+
+                                    update_buy_column(epoch, "PE_STRIKE_1m_Ticker")
+
+                                    # update_buy_table(symbolparam["pesymbol"], hammer_high, hammer_low, epoch, now)
+                                    update_buy_table(to_buy_db_dict)
+
+                                    # print("telegram_response - ", telegram_response)
+                                    print("Buy signal generated")
+                                    print("--------------------------------------")
+
+                                else:
+                                    print("ADX less than 19.7")
+                                    update_reason_column(epoch, "ADX < 19.7", "[OCSTrade].[dbo].[PE_STRIKE_1m_Ticker]")
+                            else:
+                                to_log_db_dict["hammer"] = "N"
+                                print("No hammer formed")
+                                update_reason_column(epoch, "No hammer formed", "[OCSTrade].[dbo].[PE_STRIKE_1m_Ticker]")
+                        else:
+                            print("SMA > SMMA")
+                            update_reason_column(epoch, "SMA > SMMA", "[OCSTrade].[dbo].[PE_STRIKE_1m_Ticker]")
+                else:
+                    print("not a trade time")
+                    to_log_db_dict["is_trade_time"] = "N"
+
+                populate_log_table(to_log_db_dict)
 
         except Exception as e:
             print(e)
@@ -377,35 +410,36 @@ def is_hammer_formed(table):
     return hammer_spec_dict
 
 
-def populate_buy_table(to_buy_db_dict):
-    table = dbparam["buy_table"]
-
-    symbol = to_buy_db_dict["symbol"]
-    hammer_high = to_buy_db_dict["hammer_high"]
-    hammer_low = to_buy_db_dict["hammer_low"]
-    timestamp = to_buy_db_dict["timestamp"]
-
-    target = ""
-    buy_price = str(float(hammer_high) + 3)
-    stoploss = str(float(hammer_low) - 2)
-
-    conn = pyodbc.connect('Driver={SQL Server Native Client 11.0};'
-                          r'Server=' + server + ';'
-                          'Database=' + db + ';'
-                          'Trusted_Connection=yes;')  # integrated security
-
-    cursor = conn.cursor()
-
-    SQLCommand = (
-            "INSERT INTO " + table + " (symbol, buying_price, target, stoploss, hammer_high, hammer_low, timestamp) VALUES (?,?,?,?,?,?,?);")
-    Values = [symbol, buy_price, target, stoploss, hammer_high, hammer_low, timestamp]
-    # print(SQLCommand)
-    # Processing Query
-    cursor.execute(SQLCommand, Values)
-
-    conn.commit()
-    print("Buy table successfully populated")
-    conn.close()
+# def populate_buy_table(to_buy_db_dict):
+#     table = dbparam["buy_table"]
+#
+#     symbol = to_buy_db_dict["symbol"]
+#     fyerssymbol = to_buy_db_dict["symbol"]
+#     hammer_high = to_buy_db_dict["hammer_high"]
+#     hammer_low = to_buy_db_dict["hammer_low"]
+#     timestamp = to_buy_db_dict["timestamp"]
+#
+#     target = ""
+#     buy_price = str(float(hammer_high) + 3)
+#     stoploss = str(float(hammer_low) - 2)
+#
+#     conn = pyodbc.connect('Driver={SQL Server Native Client 11.0};'
+#                           r'Server=' + server + ';'
+#                           'Database=' + db + ';'
+#                           'Trusted_Connection=yes;')  # integrated security
+#
+#     cursor = conn.cursor()
+#
+#     SQLCommand = (
+#             "INSERT INTO " + table + " (symbol, buying_price, target, stoploss, hammer_high, hammer_low, timestamp) VALUES (?,?,?,?,?,?,?);")
+#     Values = [symbol, buy_price, target, stoploss, hammer_high, hammer_low, timestamp]
+#     # print(SQLCommand)
+#     # Processing Query
+#     cursor.execute(SQLCommand, Values)
+#
+#     conn.commit()
+#     print("Buy table successfully populated")
+#     conn.close()
 
 
 def populate_log_table(to_log_db_dict):
@@ -455,24 +489,21 @@ def populate_log_table(to_log_db_dict):
 
 
 def is_it_trade_time():
-    start_first_time_window = datetime.time(7, 15, 0)
-    end_first_time_window = datetime.time(10, 45, 0)
+    start_first_time_window = datetime.time(9, 20, 0)
+    end_first_time_window = datetime.time(11, 00, 0)
     current_first_time_window = datetime.datetime.now().time()
     first_time_window = time_in_range(start_first_time_window, end_first_time_window, current_first_time_window)
     if first_time_window == False:
-        start_second_time_window = datetime.time(10, 45, 0)
-        end_second_time_window = datetime.time(16, 00, 0)
+        start_second_time_window = datetime.time(12, 50, 0)
+        end_second_time_window = datetime.time(15, 00, 0)
         current_second_time_window = datetime.datetime.now().time()
         second_time_window = time_in_range(start_second_time_window, end_second_time_window, current_second_time_window)
 
     if first_time_window:
-#         print ("Time is morning trade time")
         return True
     elif second_time_window:
-#         print ("Time is noon trade time")
         return True
     else:
-#         print ("Not a trade time")
         return False
 
 
@@ -517,6 +548,7 @@ def update_buy_table(to_buy_db_dict):
     hammer_low = to_buy_db_dict["hammer_low"]
     epoch = to_buy_db_dict["epoch"]
     timestamp = to_buy_db_dict["timestamp"]
+    global_symbol = to_buy_db_dict["global_symbol"]
 
     conn = pyodbc.connect('Driver={SQL Server Native Client 11.0};'
                           r'Server=' + server + ';'
@@ -529,8 +561,8 @@ def update_buy_table(to_buy_db_dict):
     stoploss = float(hammer_low) - 1
 
     SQLCommand = (
-            "INSERT INTO [OCSTrade].[dbo].[OCS_Buy] (symbol, buying_price, stoploss, hammer_high, hammer_low, timestamp, epoch) VALUES (?,?,?,?,?,?,?);")
-    Values = [symbol, buying_price, stoploss, hammer_high, hammer_low, timestamp, epoch]
+            "INSERT INTO [OCSTrade].[dbo].[OCS_Buy] (symbol, buying_price, stoploss, hammer_high, hammer_low, timestamp, epoch, global_symbol) VALUES (?,?,?,?,?,?,?,?);")
+    Values = [symbol, buying_price, stoploss, hammer_high, hammer_low, timestamp, epoch, global_symbol]
 
     cur.execute(SQLCommand, Values)
 
@@ -553,10 +585,27 @@ def update_reason_column(epoch, reason, table):
     conn.close()
 
 
+def get_open_orders_count():
+    conn = pyodbc.connect('Driver={SQL Server Native Client 11.0};'
+                          r'Server=' + server + ';'
+                          'Database=' + db + ';'
+                          'Trusted_Connection=yes;')  # integrated security
+
+    cursor = conn.cursor()
+    SQLCommand = "SELECT COUNT(*) from [OCSTrade].[dbo].[OCS_Bought] where orderstatus = 'open'"
+    cursor.execute(SQLCommand)
+    results = cursor.fetchall()
+    open_order_count = results[0][0]
+    return int(open_order_count)
+
+
+
+
+
 
 
 # @cross_origin("*")
-@app.route('/gui')
+@app.route('/')
 def gui():
     return render_template('index.html')
 
@@ -645,3 +694,4 @@ def showdb():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8095, debug=False)
+    # Thread(target=populate_nifty_1m_table).start()
